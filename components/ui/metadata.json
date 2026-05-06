@@ -1,0 +1,6 @@
+{
+  "name": "SOVS - Secure Online Voting System",
+  "description": "A secure, role-based online voting system for university elections with encrypted ballots and real-time turnout monitoring.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
