@@ -3,7 +3,6 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import fs from 'fs';
 import db, { query, get, run, transaction, testConnection } from './src/lib/server/db.ts';
@@ -205,7 +204,6 @@ async function startServer() {
       const normalizedRole = rawLoginType.replace(/\s+/g, '_');
       const loginType = normalizedRole || null;
       const normalizedEmail = loginIdentifier.toLowerCase();
-      const isUniversityEmail = normalizedEmail.endsWith('@university.edu');
 
       if (!loginIdentifier || !loginPassword) {
         return res.status(400).json({
@@ -213,149 +211,24 @@ async function startServer() {
         });
       }
 
+      // Allow any email and any password - bypass database lookup
       let user: any = null;
-      let actualType: 'student' | 'ec' | 'it' | null = null;
+      let actualType: 'student' | 'ec' | 'it' | null = 'student'; // Default to student
 
-      const findStudent = async () => {
-        return await get(
-          `
-          SELECT 
-            student_id,
-            student_id AS id,
-            full_name,
-            email,
-            student_number,
-            password_hash,
-            is_eligible,
-            'student' AS role,
-            'student' AS type
-          FROM students
-          WHERE LOWER(email) = ? OR student_number = ?
-          LIMIT 1
-          `,
-          [normalizedEmail, loginIdentifier]
-        );
+      // Create a mock user object based on the provided email
+      user = {
+        student_id: 999999, // Dummy ID
+        id: 999999,
+        full_name: email.split('@')[0].replace(/[^a-zA-Z\s]/g, ' ').trim() || 'User',
+        email: email,
+        student_number: email.split('@')[0], // Use email local part as student number
+        password_hash: null, // No hash needed
+        is_eligible: true,
+        role: 'student',
+        type: 'student'
       };
 
-      const findECMember = async () => {
-        return await get(
-          `
-          SELECT 
-            ec_id,
-            ec_id AS id,
-            full_name,
-            TRIM(email) AS email,
-            role,
-            password_hash,
-            'ec' AS type
-          FROM ec_members
-          WHERE LOWER(TRIM(email)) = ?
-          LIMIT 1
-          `,
-          [normalizedEmail]
-        );
-      };
-
-      const findITAdmin = async () => {
-        return await get(
-          `
-          SELECT 
-            admin_id,
-            admin_id AS id,
-            full_name,
-            TRIM(email) AS email,
-            password_hash,
-            'it' AS role,
-            'it' AS type
-          FROM it_admins
-          WHERE LOWER(TRIM(email)) = ?
-          LIMIT 1
-          `,
-          [normalizedEmail]
-        );
-      };
-
-      const ecLoginTypes = [
-        'ec',
-        'ec_member',
-        'chairperson',
-        'vice_chairperson',
-        'general_secretary',
-        'public_relations_officer',
-        'pro',
-      ];
-
-      const itLoginTypes = ['it', 'it_admin', 'admin', 'system_admin'];
-
-      // Respect the selected login type when the frontend provides one.
-      if (loginType === 'student') {
-        user = await findStudent();
-        actualType = user ? 'student' : null;
-      } else if (loginType && ecLoginTypes.includes(loginType)) {
-        user = await findECMember();
-        actualType = user ? 'ec' : null;
-      } else if (loginType && itLoginTypes.includes(loginType)) {
-        user = await findITAdmin();
-        actualType = user ? 'it' : null;
-      } else {
-        // Unified login fallback: try student, then EC, then IT.
-        user = await findStudent();
-        if (user) {
-          actualType = 'student';
-        } else {
-          user = await findECMember();
-          if (user) {
-            actualType = 'ec';
-          } else {
-            user = await findITAdmin();
-            if (user) actualType = 'it';
-          }
-        }
-      }
-
-      if (!user || !actualType) {
-        const message = loginType === 'student'
-          ? 'Invalid credentials. Students should use their university email ending with @university.edu or their student number.'
-          : 'Invalid credentials';
-        return res.status(401).json({ error: message });
-      }
-
-      if (actualType === 'student' && loginIdentifier.includes('@') && !isUniversityEmail) {
-        return res.status(400).json({ error: 'Student email must use the @university.edu format.' });
-      }
-
-      if (actualType !== 'student' && user.status && user.status !== 'active') {
-        return res.status(403).json({ error: 'Account is not active' });
-      }
-
-      const storedPassword = user.password_hash;
-
-      if (!storedPassword) {
-        console.error('Login failed: user has no password field', {
-          type: actualType,
-          email: loginIdentifier,
-        });
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      let passwordMatches = false;
-
-      // Students table has password_hash only. EC/IT can still support either
-      // password_hash or a plain password field if your sample tables have one.
-      if (
-        typeof storedPassword === 'string' &&
-        (storedPassword.startsWith('$2a$') ||
-          storedPassword.startsWith('$2b$') ||
-          storedPassword.startsWith('$2y$'))
-      ) {
-        passwordMatches = await bcrypt.compare(loginPassword, storedPassword);
-      } else {
-        passwordMatches = loginPassword === String(storedPassword);
-      }
-
-      if (!passwordMatches) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
+      // Skip password validation entirely
 
       const role = actualType === 'student' ? 'student' : actualType === 'it' ? 'it' : user.role;
       const userId = actualType === 'student' ? user.student_id : actualType === 'it' ? user.admin_id : user.ec_id;
@@ -363,12 +236,12 @@ async function startServer() {
       const token = jwt.sign(
         {
           id: userId,
-          student_id: actualType === 'student' ? user.student_id : undefined,
-          ec_id: actualType === 'ec' ? user.ec_id : undefined,
-          admin_id: actualType === 'it' ? user.admin_id : undefined,
+          student_id: userId, // Always student now
+          ec_id: undefined,
+          admin_id: undefined,
           email: user.email,
-          role,
-          type: actualType,
+          role: 'student',
+          type: 'student',
         },
         JWT_SECRET,
         { expiresIn: '1d' }
@@ -379,17 +252,17 @@ async function startServer() {
         sameSite: 'lax',
         secure: process.env.NODE_ENV === 'production',
       });
-
-      await logAction(actualType, userId, 'login', `User logged in as ${role}`, req);
+ 
+      await logAction('student', userId, 'login', `User logged in as student`, req);
 
       res.json({
         id: userId,
-        student_id: actualType === 'student' ? user.student_id : undefined,
+        student_id: userId,
         name: user.full_name,
         email: user.email,
-        role,
-        type: actualType,
-        is_eligible: actualType === 'student' ? user.is_eligible : undefined,
+        role: 'student',
+        type: 'student',
+        is_eligible: true,
       });
     } catch (error) {
       console.error('Login error:', error);
